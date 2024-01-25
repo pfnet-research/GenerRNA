@@ -22,7 +22,7 @@ parser.add_argument("--init_from", type=str, default="resume", help="Directory o
 parser.add_argument("--out_path", type=str, required=True)
 parser.add_argument("--num_samples", type=int, required=False, default=100000)
 parser.add_argument("--max_new_tokens", type=int, required=True, help="number of tokens generated in each sample")
-parser.add_argument("--strategy",type=str, required=True,help="should be in ['greedy_search', 'sampling', 'top_k', 'beam_search']")
+parser.add_argument("--strategy",type=str, required=False,default='top_k',help="should be in ['greedy_search', 'sampling', 'top_k', 'beam_search']")
 parser.add_argument("--temperature",type=float, required=False,default=1.0,help="1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions")
 parser.add_argument("--top_k",type=int, required=False,default=20,help="retain only the top_k most likely tokens, clamp others to have 0 probability")
 parser.add_argument("--ckpt_path",type=str, required=True,help="path to a checkpoint/model")
