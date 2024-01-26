@@ -1,0 +1,4 @@
+model.pt.part-aa filter=lfs diff=lfs merge=lfs -text
+model.pt.part-ab filter=lfs diff=lfs merge=lfs -text
+model.pt.part-ac filter=lfs diff=lfs merge=lfs -text
+model.pt.part-ad filter=lfs diff=lfs merge=lfs -text
