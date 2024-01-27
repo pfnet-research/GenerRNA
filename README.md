@@ -1,3 +1,6 @@
+The trained model is provisionally placed in the following repository:
+https://huggingface.co/MasaakiKotera/GenerRNA/tree/main
+
 # GenerRNA
 GenerRNA is a generative RNA language model based on a Transformer decoder-only architecture. It was pre-trained on 30M sequences, encompassing 17B nucleotides.
 
