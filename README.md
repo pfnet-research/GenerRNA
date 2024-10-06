@@ -1,5 +1,3 @@
-# This is NOT the newest version
-
 The newest version with trained model is placed in the following repository:
 https://huggingface.co/pfnet/GenerRNA
 
