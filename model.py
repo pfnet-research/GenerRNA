@@ -145,7 +145,7 @@ class GPT(nn.Module):
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            torch.nn.init.kaiming_normal_(module.weight, a=0, mode='fan_in', nonlinearity='relu')
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
@@ -285,90 +285,80 @@ class GPT(nn.Module):
         flops_promised = 312e12 # A100 GPU bfloat16 peak flops is 312 TFLOPS
         mfu = flops_achieved / flops_promised
         return mfu
-    
+        
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, strategy='sampling', beam_size=3, eos_token_id=0, repetition_penalty=1.0):
-        """
-        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times, feeding the predictions back into the model each time.
-        Strategy can be 'greedy', 'sampling' or 'top-k'.
-        """
-        # check strategy valid
         assert strategy in ['greedy_search', 'sampling', 'top_k', 'beam_search']
 
-        for _ in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
-            # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
-            # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
+        batch_size = idx.size(0)
+        if strategy == 'beam_search':
+            # Initialize beams
+            beam_seqs = [idx.clone() for _ in range(beam_size)]
+            beam_scores = torch.zeros((batch_size, beam_size), device=idx.device)
+            completed_seqs = []
 
-            # Apply repetition penalty
-            if repetition_penalty != 1.0:
-                for i in range(idx.size(0)):
-                    for j in range(idx.size(1)):
-                        logits[i, idx[i, j]] /= repetition_penalty
+            for _ in range(max_new_tokens):
+                all_candidates = []
+                for i in range(beam_size):
+                    idx_cond = beam_seqs[i] if beam_seqs[i].size(1) <= self.config.block_size else beam_seqs[i][:, -self.config.block_size:]
+                    logits, _ = self(idx_cond)
+                    logits = logits[:, -1, :] / temperature
+                    if repetition_penalty != 1.0:
+                        for j in range(idx_cond.size(1)):
+                            logits[:, idx_cond[:, j]] /= repetition_penalty
+                    probs = F.log_softmax(logits, dim=-1)
+                    scores, indices = torch.topk(probs, beam_size, dim=-1)
 
-            if strategy == 'greedy_search':
-                idx_next = torch.argmax(logits, dim=-1, keepdim=True)
-            
-            elif strategy == 'beam_search':
-                # If beam search is the selected strategy
-
-                # First, initialize the sequences and their scores
-                beam_seqs = [idx] * beam_size
-                beam_scores = torch.zeros((idx.size(0), beam_size), device=idx.device)
-
-                for k in range(max_new_tokens):
-                    all_candidates = []
-
-                    for i, seq in enumerate(beam_seqs):
-                        # Get next token probabilities
-                        idx_cond = seq if seq.size(1) <= self.config.block_size else seq[:, -self.config.block_size:]
-                        logits, __ = self(idx_cond)
-                        logits = logits[:, -1, :]
-                        probs = F.log_softmax(logits, dim=-1)  # Use log probs to avoid numerical instability
-
-                        # Get top sequences for this beam (we could use more than beam_size here for diversity)
-                        scores, indices = torch.topk(probs, beam_size)
-                        for j in range(beam_size):
-                            candidate_seq = torch.cat([seq, indices[:, j:j+1]], dim=1)
-                            candidate_score = beam_scores[:, i] + scores[:, j]
-
+                    for j in range(beam_size):
+                        candidate_seq = torch.cat([beam_seqs[i], indices[:, j:j+1]], dim=1)
+                        candidate_score = beam_scores[:, i] + scores[:, j]
+                        if indices[0, j] == eos_token_id:
+                            completed_seqs.append((candidate_score, candidate_seq))
+                        else:
                             all_candidates.append((candidate_score, candidate_seq))
 
-                    # Sort all candidates by score
-                    all_candidates.sort(key=lambda x: -x[0].mean().item())  # Average score over the batch
+                # add random noise when sorting beacause that generated sequences of beam_search remain unchanged if they have the same prefix
+                all_candidates.sort(key=lambda x: x[0].mean().item() + torch.rand(1).item() * 5e-1, reverse=True)
 
-                    # Get the top sequences
-                    beam_seqs = [all_candidates[i][1] for i in range(beam_size)]
-                    beam_scores = torch.stack([all_candidates[i][0] for i in range(beam_size)], dim=1)
+                beam_seqs = [all_candidates[i][1] for i in range(min(beam_size, len(all_candidates)))]
+                beam_scores = torch.stack([all_candidates[i][0] for i in range(min(beam_size, len(all_candidates)))], dim=1)
+                if len(completed_seqs) >= beam_size:
+                    break
 
-                # At the end, choose the sequence with the highest score
-                idx = beam_seqs[0]
-                return idx if idx[0][0] != eos_token_id else idx[:, 1:]
-            
-            elif strategy == 'sampling':
-                # apply softmax to convert logits to (normalized) probabilities
-                probs = F.softmax(logits, dim=-1)
-                # sample from the distribution
-                idx_next = torch.multinomial(probs, num_samples=1)
-            
-            elif strategy == 'top_k':
-                if top_k is not None:
-                    logits, indices = torch.topk(logits, min(top_k, logits.size(-1)))
+            if not completed_seqs:
+                completed_seqs = [(beam_scores[:, i], beam_seqs[i]) for i in range(beam_size)]
+
+            completed_seqs.sort(key=lambda x: x[0].mean().item(), reverse=True)
+            return completed_seqs[0][1]
+
+
+        else:
+            for _ in range(max_new_tokens):
+                idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+                logits, _ = self(idx_cond)
+                logits = logits[:, -1, :] / temperature
+
+                if repetition_penalty != 1.0:
+                    for i in range(idx.size(0)):
+                        for j in range(idx.size(1)):
+                            logits[i, idx[i, j]] /= repetition_penalty
+
+                if strategy == 'greedy_search':
+                    idx_next = torch.argmax(logits, dim=-1, keepdim=True)
+                
+                elif strategy == 'sampling':
                     probs = F.softmax(logits, dim=-1)
                     idx_next = torch.multinomial(probs, num_samples=1)
-                    idx_next = torch.gather(indices, dim=-1, index=idx_next)
-           
-            # append sampled index to the running sequence and continue
-            if strategy != 'beam_search':
+                
+                elif strategy == 'top_k':
+                    if top_k is not None:
+                        logits, indices = torch.topk(logits, min(top_k, logits.size(-1)))
+                        probs = F.softmax(logits, dim=-1)
+                        idx_next = torch.multinomial(probs, num_samples=1)
+                        idx_next = torch.gather(indices, dim=-1, index=idx_next)
+
                 if idx_next == eos_token_id:
                     break
                 idx = torch.cat((idx, idx_next), dim=1)
 
-            
         return idx if idx[0][0] != eos_token_id else idx[:, 1:]
-
-
